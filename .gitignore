@@ -1,3 +1,4 @@
+target/
 openseries.exe
-dbg.*
-*.exe~
+*.old
+*.new

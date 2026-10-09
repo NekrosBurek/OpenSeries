@@ -1,0 +1,53 @@
+[workspace]
+resolver = "3"
+members = ["crates/openseries-core", "crates/openseries"]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/NekrosBurek/OpenSeries"
+
+[workspace.dependencies]
+openseries-core = { path = "crates/openseries-core" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+interprocess = "2"
+hidapi = { version = "2", default-features = false, features = ["windows-native"] }
+windows = { version = "0.61", features = [
+    "Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant",
+    "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_Devices_FunctionDiscovery", "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties", "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging",
+    "Win32_Security",
+] }
+windows-core = "0.61"
+
+# GPUI pins identical to OpenLogi (known-good on Windows).
+gpui = { package = "gpui-pre", version = "=0.3.4" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.4", features = ["font-kit", "x11", "wayland"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.6.1" }
+gpui-kit-assets = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.6.1" }
+
+[patch."https://github.com/longbridge/gpui-kit"]
+gpui-component = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
+gpui-base = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
+gpui-kit-assets = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
+gpui-component-macros = { git = "https://github.com/AprilNEA/gpui-kit", rev = "1ac69bd51f744f3664361d9abd609bfc16de489f" }
+
+[profile.dev]
+debug = "limited"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 1
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

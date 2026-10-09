@@ -5,14 +5,17 @@ on:
 permissions:
   contents: write
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  windows:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - run: GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=${GITHUB_REF_NAME}" -o openseries-windows-amd64.exe .
-      - run: gh release create "$GITHUB_REF_NAME" openseries-windows-amd64.exe --generate-notes
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo build --release -p openseries
+      # Same asset name as the Go v0.2 builds so their updater hands over.
+      - run: copy target\release\openseries.exe openseries-windows-amd64.exe
+        shell: cmd
+      - run: gh release create "$env:GITHUB_REF_NAME" openseries-windows-amd64.exe --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}

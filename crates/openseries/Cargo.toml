@@ -1,0 +1,33 @@
+[package]
+name = "openseries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# One executable, two processes: `openseries` (tray agent, always on, tiny) and
+# `openseries --ui` (GPUI window, only while open). Same file name as the Go
+# release so the v0.2 updater hands over cleanly.
+[[bin]]
+name = "openseries"
+path = "src/main.rs"
+
+[dependencies]
+openseries-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+hidapi.workspace = true
+interprocess.workspace = true
+tokio = { version = "1", default-features = false, features = ["sync"] }
+tray-icon = "0.21"
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "json"] }
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui-component.workspace = true
+gpui-kit-assets.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
