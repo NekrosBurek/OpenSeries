@@ -22,6 +22,12 @@ const appName = "OpenSeries"
 type config struct {
 	Out, In  endpoint // preferred devices; matched by ID, then by name if the USB port changed
 	Unlocked bool     `json:",omitempty"` // false = keep forcing the preferred devices as default
+
+	// Last values sent to the headset (it can't report them back). nil = never set here.
+	Sidetone *int      `json:",omitempty"` // 0..3
+	AutoOff  *int      `json:",omitempty"` // minutes, 0 = never
+	EQ       []float32 `json:",omitempty"` // 10 bands, dB
+	EQPreset string    `json:",omitempty"`
 }
 
 // snapshot is what the worker last saw; the UI renders it.
@@ -30,6 +36,8 @@ type snapshot struct {
 	Status    string
 	Outs, Ins []endpoint
 	Cfg       config
+	MicMuted  bool
+	Note      string // result of the last device command
 }
 
 var (
@@ -125,6 +133,7 @@ func worker() {
 	var h headset
 	var herr error
 	var lastPoll time.Time
+	var lastRaw string
 	lowWarned := false
 	tick := time.NewTicker(2 * time.Second)
 	for {
@@ -146,6 +155,10 @@ func worker() {
 			if prev.Online != h.Online || prev.Dongle != h.Dongle || herr != nil {
 				log.Printf("headset: %+v err=%v", h, herr)
 			}
+			if raw := fmt.Sprintf("% x", h.Raw[:min(len(h.Raw), 16)]); raw != lastRaw {
+				lastRaw = raw
+				log.Println("raw:", raw) // for mapping undocumented bytes (e.g. mic mute button)
+			}
 			systray.SetIcon(batteryIcon(h))
 			if h.Online && !h.Charging && h.Battery == 0 && !lowWarned {
 				lowWarned = true
@@ -153,12 +166,29 @@ func worker() {
 			}
 			lowWarned = lowWarned && !h.Charging && h.Battery == 0
 		}
-		publish(snapshot{H: h, Status: statusText(h, herr), Outs: outs, Ins: ins, Cfg: cfg})
+		mic, _ := resolve(ins, cfg.In)
+		publish(snapshot{H: h, Status: statusText(h, herr), Outs: outs, Ins: ins, Cfg: cfg, MicMuted: mic.ID != "" && muted(mic.ID), Note: note})
 		select {
 		case f := <-jobs:
 			f()
 		case <-tick.C:
 		}
+	}
+}
+
+var note string // worker-owned
+
+// device runs a headset command on the worker and records the outcome for the UI.
+func device(what string, send func() error, save func()) {
+	jobs <- func() {
+		if err := send(); err != nil {
+			note = what + " failed: " + err.Error()
+			log.Println(note)
+			return
+		}
+		note = ""
+		save()
+		saveConfig()
 	}
 }
 

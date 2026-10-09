@@ -29,24 +29,29 @@ type headset struct {
 	Online   bool // headset powered on and paired
 	Battery  int  // 0..100
 	Charging bool
+	Game     int // ChatMix dial, 0..100 each
+	Chat     int
 	Raw      []byte
 }
 
 var errNoReply = errors.New("no reply from headset")
 
-func readHeadset() (headset, error) {
-	paths, err := windows.CM_Get_Device_Interface_List("", &hidGUID, windows.CM_GET_DEVICE_INTERFACE_LIST_PRESENT)
-	if err != nil {
-		return headset{}, err
-	}
-	var h headset
+func arctisPaths() []string {
+	paths, _ := windows.CM_Get_Device_Interface_List("", &hidGUID, windows.CM_GET_DEVICE_INTERFACE_LIST_PRESENT)
+	var out []string
 	for _, p := range paths {
-		lp := strings.ToLower(p)
-		if !strings.Contains(lp, "vid_1038&"+arctisPID+"&"+arctisIface) {
-			continue
+		if strings.Contains(strings.ToLower(p), "vid_1038&"+arctisPID+"&"+arctisIface) {
+			out = append(out, p)
 		}
+	}
+	return out
+}
+
+func readHeadset() (headset, error) {
+	var h headset
+	for _, p := range arctisPaths() {
 		h.Dongle = true
-		buf, err := hidQuery(p, []byte{0x00, 0xb0}, 0xb0)
+		buf, err := hidQuery(p, [][]byte{{0x00, 0xb0}}, 0xb0)
 		if err != nil {
 			continue
 		}
@@ -54,6 +59,7 @@ func readHeadset() (headset, error) {
 		h.Online = buf[2] != 0x01
 		h.Battery = min(int(buf[3]), 4) * 25
 		h.Charging = buf[4] == 0x01
+		h.Game, h.Chat = min(int(buf[5]), 100), min(int(buf[6]), 100)
 		return h, nil
 	}
 	if !h.Dongle {
@@ -62,8 +68,19 @@ func readHeadset() (headset, error) {
 	return h, errNoReply
 }
 
-// hidQuery writes one output report and waits for an input report whose second byte is want.
-func hidQuery(path string, req []byte, want byte) ([]byte, error) {
+// hidSend writes commands followed by "save to headset" (0x09). Settings are write-only on this device.
+func hidSend(cmds ...[]byte) error {
+	err := errors.New("receiver not connected")
+	for _, p := range arctisPaths() {
+		if _, err = hidQuery(p, append(cmds, []byte{0x00, 0x09}), 0); err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+// hidQuery writes output reports, then (if want != 0) waits for an input report whose second byte is want.
+func hidQuery(path string, reqs [][]byte, want byte) ([]byte, error) {
 	p, _ := windows.UTF16PtrFromString(path)
 	f, err := windows.CreateFile(p, windows.GENERIC_READ|windows.GENERIC_WRITE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED, 0)
@@ -80,14 +97,21 @@ func hidQuery(path string, req []byte, want byte) ([]byte, error) {
 	pGetCaps.Call(prep, uintptr(unsafe.Pointer(&caps)))
 	pFreePrepared.Call(prep)
 	inLen, outLen := int(caps[2]), int(caps[3])
-	if inLen < 5 || outLen < len(req) {
+	if inLen < 7 || outLen < 2 {
 		return nil, errors.New("wrong HID collection")
 	}
-
-	out := make([]byte, outLen)
-	copy(out, req)
-	if _, err := overlapped(f, out, true, time.Second); err != nil {
-		return nil, err
+	for _, req := range reqs {
+		if len(req) > outLen {
+			return nil, errors.New("command longer than output report")
+		}
+		out := make([]byte, outLen)
+		copy(out, req)
+		if _, err := overlapped(f, out, true, time.Second); err != nil {
+			return nil, err
+		}
+	}
+	if want == 0 {
+		return nil, nil
 	}
 	deadline := time.Now().Add(time.Second)
 	in := make([]byte, inLen)
@@ -129,4 +153,17 @@ func overlapped(f windows.Handle, buf []byte, write bool, timeout time.Duration)
 		return 0, err
 	}
 	return int(n), nil
+}
+
+func setSidetone(level int) error { return hidSend([]byte{0x00, 0x39, byte(level)}) } // 0..3
+
+func setAutoOff(minutes int) error { return hidSend([]byte{0x00, 0xa3, byte(minutes)}) } // 0 = never, max 90
+
+// setEQ takes 10 bands in dB (-12..+12, 0.5 steps).
+func setEQ(bands [10]float32) error {
+	cmd := []byte{0x00, 0x33}
+	for _, b := range bands {
+		cmd = append(cmd, byte(0x18+int(max(-12, min(12, b))*2)))
+	}
+	return hidSend(append(cmd, 0x00))
 }

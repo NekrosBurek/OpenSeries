@@ -126,3 +126,39 @@ func setDefault(id string, role int) error {
 	p, _ := windows.UTF16PtrFromString(id)
 	return vcall(pc, 13, uintptr(unsafe.Pointer(p)), uintptr(role))
 }
+
+var iidEndpointVolume = windows.GUID{Data1: 0x5CDF2C82, Data2: 0x841E, Data3: 0x4546, Data4: [8]byte{0x97, 0x22, 0x0C, 0xF7, 0x40, 0x78, 0x22, 0x9A}}
+
+// withVolume opens IAudioEndpointVolume for an endpoint ID.
+func withVolume(id string, f func(vol uintptr) error) error {
+	en, err := create(&clsidEnumerator, &iidEnumerator)
+	if err != nil {
+		return err
+	}
+	defer release(en)
+	p, _ := windows.UTF16PtrFromString(id)
+	var dev, vol uintptr
+	if err := vcall(en, 5, uintptr(unsafe.Pointer(p)), uintptr(unsafe.Pointer(&dev))); err != nil {
+		return err
+	}
+	defer release(dev)
+	if err := vcall(dev, 3, uintptr(unsafe.Pointer(&iidEndpointVolume)), 0x17, 0, uintptr(unsafe.Pointer(&vol))); err != nil {
+		return err
+	}
+	defer release(vol)
+	return f(vol)
+}
+
+func muted(id string) bool {
+	var m int32
+	withVolume(id, func(v uintptr) error { return vcall(v, 15, uintptr(unsafe.Pointer(&m))) })
+	return m != 0
+}
+
+func setMuted(id string, on bool) error {
+	b := uintptr(0)
+	if on {
+		b = 1
+	}
+	return withVolume(id, func(v uintptr) error { return vcall(v, 14, b, 0) })
+}

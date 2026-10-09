@@ -4,6 +4,8 @@ Tiny tray app for SteelSeries headsets. No ads, no Moments, no GG required. ~4 M
 
 Currently supports **Arctis 7+** on Windows.
 
+- Device view: live headset illustration with battery, mic state and ChatMix dial
+- ChatMix levels, sidetone, 10-band onboard EQ (+ presets), auto power-off
 - Battery level and charging state in the tray icon, plus a low-battery warning
 - Receiver / headset connection status
 - **Default device lock**: keeps your chosen output and mic as Windows default (default + communications roles), so calls and meetings always use the headset. Reverts any app or GG that changes it. Survives USB port changes.
