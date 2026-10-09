@@ -7,31 +7,73 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
     SPDRP_DEVICEDESC, SPDRP_FRIENDLYNAME, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
     SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceRegistryPropertyW,
 };
-use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, MAX_PATH};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, MAX_PATH, WAIT_TIMEOUT};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::Threading::{
     CreateEventW, CreateMutexW, INFINITE, OpenEventW, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW, SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
+    QueryFullProcessImageNameW, PROCESS_SYNCHRONIZE, SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId, SW_HIDE};
 use windows::core::{HSTRING, PWSTR, w};
 
-/// Executable stem of a process ("Discord"), if we may query it.
-pub fn process_name(pid: u32) -> Option<String> {
+/// Full executable path of a process, if we may query it.
+pub fn process_path(pid: u32) -> Option<String> {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; MAX_PATH as usize];
         let mut len = buf.len() as u32;
         let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
         let _ = CloseHandle(h);
-        ok.then(|| {
-            let path = String::from_utf16_lossy(&buf[..len as usize]);
-            Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
-        })
+        ok.then(|| String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+/// Executable stem of a process ("Discord"), if we may query it.
+pub fn process_name(pid: u32) -> Option<String> {
+    let path = process_path(pid)?;
+    Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned())
+}
+
+pub fn process_alive(pid: u32) -> bool {
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) else { return false };
+        let alive = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+        let _ = CloseHandle(h);
+        alive
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct App {
+    pub pid: u32,
+    /// Executable stem, the key profiles match on.
+    pub exe: String,
+    pub path: String,
+    /// Window title, used as the display name.
+    pub title: String,
+}
+
+/// The app owning the foreground window.
+pub fn foreground_app() -> Option<App> {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 || pid == std::process::id() {
+            return None;
+        }
+        let path = process_path(pid)?;
+        let mut title = [0u16; 256];
+        let n = GetWindowTextW(hwnd, &mut title);
+        let exe = Path::new(&path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        Some(App { pid, exe, path, title: String::from_utf16_lossy(&title[..n.max(0) as usize]) })
     }
 }
 

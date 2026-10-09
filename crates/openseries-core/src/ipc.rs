@@ -21,6 +21,20 @@ pub struct State {
     pub update: Option<String>,
     /// Last device command error, if any.
     pub notice: Option<String>,
+    /// Index into `config.profiles`.
+    pub active_profile: usize,
+    /// Game (or profiled app) currently holding a profile.
+    pub playing: Option<GameInfo>,
+    /// Games seen this session, newest first, for "add to profile".
+    pub recent_games: Vec<GameInfo>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct GameInfo {
+    /// Executable stem; what profiles match on.
+    pub exe: String,
+    /// Window title at detection time.
+    pub title: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -42,6 +56,11 @@ pub enum Command {
     SetMicMuted(bool),
     SetChatMix(bool),
     SetAutostart(bool),
+    ActivateProfile(usize),
+    SetProfileEq { profile: usize, bands: Vec<f32> },
+    AddProfileApp { profile: usize, exe: String },
+    RemoveProfileApp { profile: usize, exe: String },
+    SetAutoSwitch(bool),
     RunDiagnostics,
     RestartReceiver(String),
     CheckForUpdates,

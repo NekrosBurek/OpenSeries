@@ -5,6 +5,7 @@ use gpui::{AnyElement, App, ClickEvent, FontWeight, Hsla, SharedString, div, px,
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, IconName, Sizable as _, Theme, h_flex, v_flex};
 
+
 use super::{AppView, Page};
 
 pub const GREEN: u32 = 0x22c55e;
@@ -148,4 +149,60 @@ pub fn segmented(
 
 pub fn icon_button(id: &'static str, icon: impl Into<gpui_component::Icon>, label: &str) -> Button {
     Button::new(id).ghost().small().icon(icon).label(label.to_string())
+}
+
+/// GG-style ChatMix balance: one line, centre = both at 100%, knob leans toward
+/// the side that's louder (Game left, Chat right).
+pub fn chatmix_line(cx: &App, mix: Option<openseries_core::devices::ChatMix>, height: f32) -> impl IntoElement {
+    let (game, chat) = mix.map_or((100, 100), |m| (m.game, m.chat));
+    // -1 = full game, +1 = full chat.
+    let pos = if chat < 100 { -(100.0 - f32::from(chat)) / 100.0 } else { (100.0 - f32::from(game)) / 100.0 };
+    let frac = (pos + 1.0) / 2.0;
+    let knob = height * 0.6;
+    let fill = if pos < 0.0 { accent() } else { rgb_hsla(BLUE) };
+    let label = |name: &str, v: u8, colour: Hsla, cx: &App| {
+        v_flex()
+            .w(px(56.))
+            .items_center()
+            .child(div().text_xs().text_color(cx.theme().muted_foreground).child(name.to_string()))
+            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(colour).child(if mix.is_some() { format!("{v}%") } else { "—".into() }))
+    };
+    h_flex()
+        .w_full()
+        .gap_2()
+        .child(label("GAME", game, accent(), cx))
+        .child(
+            div()
+                .flex_1()
+                .h(px(height))
+                .relative()
+                // Track.
+                .child(div().absolute().left_0().right_0().top(px(height / 2. - 1.5)).h(px(3.)).rounded_full().bg(cx.theme().muted))
+                // Fill from the centre to the knob.
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(height / 2. - 1.5))
+                        .h(px(3.))
+                        .rounded_full()
+                        .bg(fill)
+                        .left(gpui::relative(frac.min(0.5)))
+                        .w(gpui::relative((frac - 0.5).abs())),
+                )
+                // Centre tick: both at 100%.
+                .child(div().absolute().left(gpui::relative(0.5)).ml(px(-1.)).top(px(height / 2. - 6.)).w(px(2.)).h(px(12.)).bg(cx.theme().muted_foreground))
+                .child(
+                    div()
+                        .absolute()
+                        .left(gpui::relative(frac))
+                        .ml(px(-knob / 2.))
+                        .top(px((height - knob) / 2.))
+                        .size(px(knob))
+                        .rounded_full()
+                        .bg(gpui::white())
+                        .border_2()
+                        .border_color(if mix.is_some() { fill } else { cx.theme().muted }),
+                ),
+        )
+        .child(label("CHAT", chat, rgb_hsla(BLUE), cx))
 }

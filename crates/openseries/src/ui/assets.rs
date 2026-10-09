@@ -24,8 +24,17 @@ fn cached(name: &str) -> PathBuf {
     openseries_core::paths::image_cache().join(name)
 }
 
-/// Render to show for a device: its own, else the generic for its kind, else nothing yet.
+/// HD variant of a render (`arctis_7.webp` -> `hd/arctis_7.png`).
+fn hd_name(image: &str) -> String {
+    format!("hd/{}.png", image.trim_end_matches(".webp"))
+}
+
+/// Render to show for a device: HD, else its own, else the generic for its kind, else nothing yet.
 pub fn image_for(d: &Device) -> Option<PathBuf> {
+    let hd = cached(&hd_name(&d.image));
+    if hd.exists() {
+        return Some(hd);
+    }
     let own = cached(&d.image);
     if own.exists() {
         return Some(own);
@@ -37,7 +46,7 @@ pub fn image_for(d: &Device) -> Option<PathBuf> {
 /// Fetch any missing renders in the background; the view repaints when they land.
 pub(super) fn prefetch(s: &State, _cx: &mut gpui::App) {
     for d in &s.devices {
-        for name in [d.image.clone(), format!("generics/{}.webp", generic(d.kind))] {
+        for name in [hd_name(&d.image), d.image.clone(), format!("generics/{}.webp", generic(d.kind))] {
             if cached(&name).exists() {
                 continue;
             }
@@ -70,7 +79,11 @@ fn fetch(name: &str) -> anyhow::Result<()> {
         std::fs::copy(local, &dest)?;
         return Ok(());
     }
-    let url = format!("{}/{name}", openseries_core::ASSETS_BASE);
+    // Mirror layout: devices/<name>.webp (GG renders) and hd/<name>.png.
+    let url = match name.strip_prefix("hd/") {
+        Some(hd) => format!("{}/hd/{hd}", openseries_core::ASSETS_ROOT),
+        None => format!("{}/devices/{name}", openseries_core::ASSETS_ROOT),
+    };
     let mut body = ureq::get(&url).call()?.into_body();
     let bytes = body.read_to_vec()?;
     let tmp = dest.with_extension("part");

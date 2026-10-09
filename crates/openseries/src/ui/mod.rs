@@ -4,6 +4,7 @@
 pub mod assets;
 mod headset;
 mod pages;
+mod peripheral;
 mod widgets;
 
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{Bounds, ClickEvent, Size, Subscription, TitlebarOptions, Window, WindowBounds, WindowOptions, div, px};
 use gpui_component::{ActiveTheme as _, Root, Theme, ThemeMode, h_flex, v_flex};
+use openseries_core::devices::Kind;
 use openseries_core::ipc::{self, Command, Diagnostics, Event, State};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -47,6 +49,7 @@ pub struct AppView {
     auto_opened: bool,
     cmds: Sender<Command>,
     eq: headset::EqEditor,
+    dpi: peripheral::DpiEditor,
     _subs: Vec<Subscription>,
 }
 
@@ -126,8 +129,10 @@ pub fn run() {
                 let eq = headset::EqEditor::new(window, cx);
                 let mut subs = Vec::new();
                 eq.subscribe(&mut subs, cx);
+                let dpi = peripheral::DpiEditor::new(cx);
+                dpi.subscribe(&mut subs, cx);
                 spawn_receiver(rx, window, cx);
-                AppView { state: None, connected: false, page: Page::Home, tab: 0, diagnostics: None, diag_running: false, hot: None, routed: false, auto_opened: false, cmds, eq, _subs: subs }
+                AppView { state: None, connected: false, page: Page::Home, tab: 0, diagnostics: None, diag_running: false, hot: None, routed: false, auto_opened: false, cmds, eq, dpi, _subs: subs }
             });
             cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
         });
@@ -206,6 +211,7 @@ impl Render for AppView {
             (None, _) => widgets::empty(cx, if self.connected { "Loading…" } else { "Starting OpenSeries…" }).into_any_element(),
             (Some(_), Page::Home) => pages::home(self, cx).into_any_element(),
             (Some(s), Page::Device(key)) => match s.devices.iter().find(|d| d.key == key).cloned() {
+                Some(d) if matches!(d.kind, Kind::Mouse | Kind::Keyboard) => peripheral::detail(self, &d, window, cx).into_any_element(),
                 Some(d) => headset::detail(self, &d, window, cx).into_any_element(),
                 None => pages::gone(self, cx).into_any_element(),
             },

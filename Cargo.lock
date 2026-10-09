@@ -5119,6 +5119,7 @@ name = "openseries"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "embed-resource",
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",
@@ -5127,6 +5128,7 @@ dependencies = [
  "image",
  "interprocess",
  "openseries-core",
+ "png 0.17.16",
  "serde",
  "serde_json",
  "tokio",

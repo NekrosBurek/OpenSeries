@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod devices;
+pub mod games;
 pub mod ipc;
 pub mod paths;
 
@@ -17,4 +18,4 @@ pub const APP_NAME: &str = "OpenSeries";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const REPO: &str = "NekrosBurek/OpenSeries";
 /// Product renders live outside the code repo (same split as OpenLogi's asset mirror).
-pub const ASSETS_BASE: &str = "https://raw.githubusercontent.com/NekrosBurek/openseries-assets/main/devices";
+pub const ASSETS_ROOT: &str = "https://raw.githubusercontent.com/NekrosBurek/openseries-assets/main";

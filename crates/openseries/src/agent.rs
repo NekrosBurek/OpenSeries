@@ -16,7 +16,7 @@ use interprocess::local_socket::SendHalf;
 use openseries_core::audio::{self, Flow, ROLES};
 use openseries_core::config::{Config, EndpointRef};
 use openseries_core::devices::{self, Device, Found, Kind, Link, Setting};
-use openseries_core::ipc::{self, AudioState, Check, Command, Diagnostics, Event, State};
+use openseries_core::ipc::{self, AudioState, Check, Command, Diagnostics, Event, GameInfo, State};
 use openseries_core::system::{self, Instance};
 use tracing::{info, warn};
 
@@ -93,6 +93,12 @@ struct Worker {
     chatmix_applied: Option<(u8, u8)>,
     chatmix_at: Instant,
     raw_log: Vec<(u16, Vec<u8>)>,
+    /// Products whose saved lighting was applied since they connected.
+    lit: std::collections::HashSet<u16>,
+    read_at: std::collections::HashMap<u16, Instant>,
+    profiles: Profiles,
+    /// Last failed EQ write, so an offline/unhappy headset isn't hammered.
+    eq_retry: Option<Instant>,
     clients: Clients,
     latest: Arc<Mutex<State>>,
     tray: Sender<TrayMsg>,
@@ -115,6 +121,10 @@ impl Worker {
             chatmix_applied: None,
             chatmix_at: long_ago,
             raw_log: Vec::new(),
+            lit: Default::default(),
+            read_at: Default::default(),
+            profiles: Profiles::default(),
+            eq_retry: None,
             clients,
             latest,
             tray,
@@ -146,7 +156,29 @@ impl Worker {
                 self.found = devices::scan(api);
             }
             let api = &*api;
-            self.devices = self.found.iter().map(|f| devices::read(api, f)).collect();
+            let now = Instant::now();
+            let mut devices = Vec::with_capacity(self.found.len());
+            for f in &self.found {
+                // Headsets every tick (live ChatMix); mice/keyboards every 10 s (battery only).
+                let cached = self.devices.iter().find(|d| d.pid == f.pid).filter(|d| d.kind != Kind::Headset);
+                let fresh = self.read_at.get(&f.pid).is_some_and(|t| now.duration_since(*t) < Duration::from_secs(10));
+                match cached {
+                    Some(d) if fresh => devices.push(d.clone()),
+                    _ => {
+                        self.read_at.insert(f.pid, now);
+                        devices.push(devices::read(api, f));
+                    }
+                }
+            }
+            if std::env::var_os("OPENSERIES_MOCK").is_some() {
+                devices.extend(mock_devices());
+            }
+            self.devices = devices;
+            // Forget devices that went away so they're re-initialised when they return.
+            let present: Vec<u16> = self.found.iter().map(|f| f.pid).collect();
+            self.lit.retain(|p| present.contains(p));
+            self.read_at.retain(|p, _| present.contains(p));
+            self.restore_lighting();
         }
         self.log_raw_changes();
         if self.last_audio.elapsed() >= Duration::from_secs(1) {
@@ -154,6 +186,11 @@ impl Worker {
             self.refresh_audio();
         }
         self.drive_chatmix();
+        if self.profiles.last_check.elapsed() >= Duration::from_secs(1) {
+            self.profiles.last_check = Instant::now();
+            self.follow_foreground();
+        }
+        self.sync_eq();
         self.publish();
     }
 
@@ -228,6 +265,98 @@ impl Worker {
         self.chatmix_at = Instant::now();
     }
 
+    /// Keyboards forget direct-mode colours on replug; put the saved one back once per connection.
+    fn restore_lighting(&mut self) {
+        let Some(api) = &self.api else { return };
+        for d in self.devices.iter().filter(|d| d.kind == Kind::Keyboard && d.link == Link::Online) {
+            if self.lit.contains(&d.pid) {
+                continue;
+            }
+            self.lit.insert(d.pid);
+            let Some(l) = self.cfg.devices.get(&d.key).and_then(|s| s.lighting) else { continue };
+            if let Some(found) = self.found.iter().find(|f| f.pid == d.pid) {
+                let r = devices::apply(api, found, &Setting::Lighting { rgb: l.rgb, brightness: l.brightness });
+                info!("restored lighting on {}: {r:?}", d.name);
+            }
+        }
+    }
+
+    /// Pick the profile for whatever is in front. A game keeps its profile until it
+    /// exits (not on every alt-tab), which keeps EQ writes to the headset's flash rare.
+    fn follow_foreground(&mut self) {
+        let p = &mut self.profiles;
+        if let Some(held) = &p.playing
+            && !system::process_alive(held.pid)
+        {
+            info!("{} exited", held.info.exe);
+            p.playing = None;
+        }
+        if let Some(app) = system::foreground_app() {
+            let game = openseries_core::games::is_game(&app.path);
+            let idx = self.cfg.profile_for(Some(&app.exe), game);
+            if game || idx != 0 {
+                let info = GameInfo { exe: app.exe.clone(), title: if app.title.is_empty() { app.exe.clone() } else { app.title.clone() } };
+                if game && p.recent.first().map(|g| &g.exe) != Some(&info.exe) {
+                    p.recent.retain(|g| g.exe != info.exe);
+                    p.recent.insert(0, info.clone());
+                    p.recent.truncate(8);
+                }
+                if p.playing.as_ref().is_none_or(|h| h.pid != app.pid) {
+                    info!("now playing {} ({}) -> profile {}", info.title, app.exe, self.cfg.profiles[idx].name);
+                    p.playing = Some(Held { pid: app.pid, info, profile: idx });
+                } else if let Some(h) = &mut p.playing {
+                    h.profile = idx; // app was (re)assigned to another profile
+                }
+            }
+        }
+        if !self.cfg.auto_switch {
+            return;
+        }
+        let target = p.playing.as_ref().map_or(0, |h| h.profile);
+        // Only act on changes, so a manual pick sticks until the situation changes.
+        if p.last_target != Some(target) {
+            p.last_target = Some(target);
+            if p.active != target {
+                info!("switching to profile {}", self.cfg.profiles[target].name);
+                p.active = target;
+                self.eq_retry = None;
+            }
+        }
+    }
+
+    /// Make every connected headset's EQ match the active profile.
+    fn sync_eq(&mut self) {
+        if self.eq_retry.is_some_and(|t| t.elapsed() < Duration::from_secs(10)) {
+            return;
+        }
+        let Some(profile) = self.cfg.profiles.get(self.profiles.active) else { return };
+        let (want, name) = (profile.eq.clone(), profile.name.clone());
+        let Some(api) = &self.api else { return };
+        for d in self.devices.iter().filter(|d| d.link == Link::Online && d.features.equalizer) {
+            let recorded = self.cfg.devices.get(&d.key).and_then(|s| s.eq.as_ref());
+            // Never written by us and nothing asked for a change: leave the headset's own EQ alone.
+            if recorded == Some(&want) || (recorded.is_none() && self.profiles.active == 0) {
+                continue;
+            }
+            let Some(found) = self.found.iter().find(|f| f.pid == d.pid) else { continue };
+            match devices::apply(api, found, &Setting::Equalizer(want.clone())) {
+                Ok(()) => {
+                    info!("EQ for {} set from profile {name}", d.name);
+                    let s = self.cfg.devices.entry(d.key.clone()).or_default();
+                    s.eq = Some(want.clone());
+                    s.eq_preset = Some(name.clone());
+                    if let Err(e) = self.cfg.save() {
+                        warn!("saving config: {e}");
+                    }
+                }
+                Err(e) => {
+                    warn!("EQ write failed: {e}");
+                    self.eq_retry = Some(Instant::now());
+                }
+            }
+        }
+    }
+
     fn publish(&mut self) {
         let state = State {
             version: openseries_core::VERSION.into(),
@@ -237,6 +366,9 @@ impl Worker {
             autostart: self.autostart,
             update: self.update.clone(),
             notice: self.notice.clone(),
+            active_profile: self.profiles.active,
+            playing: self.profiles.playing.as_ref().map(|a| a.info.clone()),
+            recent_games: self.profiles.recent.clone(),
         };
         let mut latest = self.latest.lock().unwrap();
         if *latest == state {
@@ -269,6 +401,31 @@ impl Worker {
                 }
                 self.autostart = system::autostart();
             }
+            Command::ActivateProfile(i) if i < self.cfg.profiles.len() => {
+                self.profiles.active = i;
+                self.eq_retry = None;
+            }
+            Command::SetProfileEq { profile, bands } if profile < self.cfg.profiles.len() && bands.len() == 10 => {
+                self.cfg.profiles[profile].eq = bands;
+                self.eq_retry = None;
+                self.save();
+            }
+            Command::AddProfileApp { profile, exe } if profile < self.cfg.profiles.len() => {
+                // An app belongs to one profile at a time.
+                for p in &mut self.cfg.profiles {
+                    p.apps.retain(|a| !a.eq_ignore_ascii_case(&exe));
+                }
+                self.cfg.profiles[profile].apps.push(exe);
+                self.profiles.last_target = None; // re-evaluate now
+                self.save();
+            }
+            Command::RemoveProfileApp { profile, exe } if profile < self.cfg.profiles.len() => {
+                self.cfg.profiles[profile].apps.retain(|a| !a.eq_ignore_ascii_case(&exe));
+                self.profiles.last_target = None;
+                self.save();
+            }
+            Command::SetAutoSwitch(on) => self.set_pref(|cfg| cfg.auto_switch = on),
+            Command::ActivateProfile(_) | Command::SetProfileEq { .. } | Command::AddProfileApp { .. } | Command::RemoveProfileApp { .. } => {}
             Command::RunDiagnostics => {
                 let d = self.diagnose();
                 broadcast(&self.clients, &Event::Diagnostics(d));
@@ -297,7 +454,7 @@ impl Worker {
 
     fn apply(&mut self, device: &str, setting: Setting) {
         let Some(api) = &self.api else { return };
-        let Some(found) = self.found.iter().find(|f| f.model.is_some_and(|m| m.key == device)) else {
+        let Some(found) = self.found.iter().find(|f| f.model.is_some_and(|m| m.key == device) && f.control.is_some()) else {
             self.notice = Some("Device is not connected".into());
             return;
         };
@@ -311,6 +468,12 @@ impl Worker {
                     Setting::Equalizer(bands) => {
                         s.eq_preset = Some(devices::eq_preset_name(&bands).unwrap_or("Custom").into());
                         s.eq = Some(bands);
+                    }
+                    Setting::Dpi(stages) => s.dpi = Some(stages),
+                    Setting::Polling(hz) => s.polling = Some(hz),
+                    Setting::Lighting { rgb, brightness } => {
+                        s.lighting = Some(openseries_core::config::Lighting { rgb, brightness });
+                        self.lit.insert(found.pid);
                     }
                 }
                 self.save();
@@ -436,4 +599,51 @@ fn migrate_go_config() {
     if cfg.save().is_ok() {
         info!("migrated config.json from the Go build");
     }
+}
+
+struct Held {
+    pid: u32,
+    info: GameInfo,
+    profile: usize,
+}
+
+struct Profiles {
+    active: usize,
+    playing: Option<Held>,
+    recent: Vec<GameInfo>,
+    last_target: Option<usize>,
+    last_check: Instant,
+}
+
+impl Default for Profiles {
+    fn default() -> Self {
+        Self { active: 0, playing: None, recent: Vec::new(), last_target: None, last_check: Instant::now() - Duration::from_secs(60) }
+    }
+}
+
+/// `OPENSERIES_MOCK=1`: fake a mouse and a keyboard for UI work without the hardware.
+fn mock_devices() -> Vec<Device> {
+    use openseries_core::devices::{Battery, Features};
+    let mut mouse = Device {
+        key: "aerox_3_wireless".into(),
+        name: "Aerox 3 Wireless (mock)".into(),
+        kind: Kind::Mouse,
+        pid: 0xfff1,
+        image: "aerox_3_wireless_gen2_shadow.webp".into(),
+        link: Link::Online,
+        features: Features { battery: true, dpi_min: 100, dpi_max: 18000, dpi_step: 100, polling: true, color_zones: 3, ..Features::default() },
+        battery: Some(Battery { percent: 80, charging: false }),
+        chatmix: None,
+        raw: Vec::new(),
+    };
+    let mut kb = mouse.clone();
+    kb.key = "apex_pro_tkl_2023".into();
+    kb.name = "Apex Pro TKL (mock)".into();
+    kb.kind = Kind::Keyboard;
+    kb.pid = 0xfff2;
+    kb.image = "apex_pro_tkl_2024.webp".into();
+    kb.battery = None;
+    kb.features = Features { color_zones: 1, brightness: true, ..Features::default() };
+    mouse.raw.clear();
+    vec![mouse, kb]
 }

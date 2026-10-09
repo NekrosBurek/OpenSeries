@@ -31,3 +31,7 @@ gpui-kit-assets.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
+
+[build-dependencies]
+embed-resource = "3"
+png = "0.17"
